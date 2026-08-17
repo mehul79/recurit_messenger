@@ -7,6 +7,7 @@ load_dotenv()
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "thapar_job_alert_7979")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
 TICK_SECRET = os.getenv("TICK_SECRET", "dev_tick_secret_123")
+STUDENT_PORTAL_JOBS_URL = "https://recruit.thapar.edu/student/jobs"
 
 _client = None
 
@@ -26,7 +27,7 @@ def send_new_job_push(job: dict) -> bool:
     ctc = str(job.get("ctc", ""))
     deadline = str(job.get("deadline", "N/A"))
     location = str(job.get("location", ""))
-    link = str(job.get("link", "https://recruit.thapar.edu"))
+    link = STUDENT_PORTAL_JOBS_URL
 
     body_lines = [
         f"Stipend: {stipend}",
@@ -68,7 +69,7 @@ def send_checkpoint_alarm(job: dict, label: str) -> bool:
     stipend = str(job.get("stipend", "N/A"))
     ctc = str(job.get("ctc", ""))
     deadline = str(job.get("deadline", "N/A"))
-    link = str(job.get("link", "https://recruit.thapar.edu"))
+    link = STUDENT_PORTAL_JOBS_URL
 
     body_lines = [
         f"⚠️ Deadline approaching in ~{label}!",
