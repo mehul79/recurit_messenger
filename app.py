@@ -17,11 +17,8 @@ app = FastAPI(title="Thapar RecruitSage Watcher")
 
 @app.on_event("startup")
 def on_startup():
-    try:
-        init_db()
-        print("Database schema initialized successfully.")
-    except Exception as e:
-        print(f"Warning: Database initialization deferred (will retry on first request): {e}")
+    init_db()
+
 
 
 @app.get("/health")
