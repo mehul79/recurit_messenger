@@ -6,8 +6,9 @@ from state import get_session, Meta
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://api.recruit.thapar.edu")
-SUPABASE_ANON = os.getenv("SUPABASE_ANON")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://api.recruit.thapar.edu").strip()
+SUPABASE_ANON = os.getenv("SUPABASE_ANON", "").strip().replace("\n", "").replace("\r", "")
+
 
 _token_cache = {
     "access_token": None,
