@@ -56,10 +56,34 @@ def update_stored_tokens(access_token: str, refresh_token: str, expires_in: int 
     finally:
         session.close()
 
+def login_with_password() -> str:
+    email = os.getenv("PORTAL_EMAIL", "mgupta6_be23@thapar.edu")
+    password = os.getenv("PORTAL_PASSWORD", "Alpha@123")
+    
+    url = f"{get_supabase_url()}/auth/v1/token?grant_type=password"
+    headers = {
+        "apikey": get_supabase_anon(),
+        "Content-Type": "application/json"
+    }
+    payload = {"email": email, "password": password}
+
+    with httpx.Client(timeout=15.0) as client:
+        resp = client.post(url, headers=headers, json=payload)
+        if resp.status_code == 200:
+            data = resp.json()
+            access_token = data.get("access_token")
+            refresh_token = data.get("refresh_token")
+            expires_in = data.get("expires_in", 3600)
+            update_stored_tokens(access_token, refresh_token, expires_in)
+            print("Successfully authenticated via email & password fallback!")
+            return access_token
+        else:
+            raise RuntimeError(f"Failed email/password authentication (HTTP {resp.status_code}): {resp.text}")
+
 def refresh_access_token() -> str:
     refresh_token = get_stored_refresh_token()
     if not refresh_token:
-        raise ValueError("No PORTAL_REFRESH_TOKEN found in .env or database meta table!")
+        return login_with_password()
     
     url = f"{get_supabase_url()}/auth/v1/token?grant_type=refresh_token"
     headers = {
@@ -78,7 +102,8 @@ def refresh_access_token() -> str:
             update_stored_tokens(new_access_token, new_refresh_token, expires_in)
             return new_access_token
         else:
-            raise RuntimeError(f"Failed to refresh Supabase access token (HTTP {resp.status_code}): {resp.text}")
+            print(f"Refresh token failed (HTTP {resp.status_code}): {resp.text}. Falling back to email/password login...")
+            return login_with_password()
 
 def get_valid_access_token() -> str:
     global _token_cache
