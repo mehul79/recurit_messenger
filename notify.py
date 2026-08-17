@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "thapar_job_alert_7979")
+# ntfy.sh meters anonymous publishing per source IP, and Render's outbound IPs are
+# shared - neighbours exhaust the daily quota and pushes come back 429. A token bills
+# the quota to the account instead.
+NTFY_TOKEN = os.getenv("NTFY_TOKEN", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
 TICK_SECRET = os.getenv("TICK_SECRET", "dev_tick_secret_123")
 STUDENT_PORTAL_JOBS_URL = "https://recruit.thapar.edu/student/jobs"
@@ -25,7 +29,8 @@ def _fail(msg: str) -> bool:
 def get_http_client():
     global _client
     if _client is None or _client.is_closed:
-        _client = httpx.Client(timeout=20.0, follow_redirects=True)
+        headers = {"Authorization": f"Bearer {NTFY_TOKEN}"} if NTFY_TOKEN else {}
+        _client = httpx.Client(timeout=20.0, follow_redirects=True, headers=headers)
     return _client
 
 def send_auth_alert(detail: str) -> bool:

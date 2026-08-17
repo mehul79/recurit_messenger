@@ -17,6 +17,8 @@ services:
         sync: false
       - key: NTFY_TOPIC
         sync: false
+      - key: NTFY_TOKEN
+        sync: false
       - key: PUBLIC_BASE_URL
         sync: false
       - key: TICK_SECRET
