@@ -8,6 +8,14 @@ NTFY_TOPIC = os.getenv("NTFY_TOPIC", "thapar_job_alert_7979")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
 TICK_SECRET = os.getenv("TICK_SECRET", "dev_tick_secret_123")
 
+_client = None
+
+def get_http_client():
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.Client(timeout=20.0, follow_redirects=True)
+    return _client
+
 def send_new_job_push(job: dict) -> bool:
     """
     Spec #1: New eligible job appears -> send one plain ntfy push, no buttons, no alarm priority.
@@ -31,8 +39,6 @@ def send_new_job_push(job: dict) -> bool:
     body_lines.append(f"Link: {link}")
 
     body = "\n".join(body_lines)
-
-    # Use ASCII hyphen instead of unicode dot to prevent HTTP header encoding errors
     header_title = f"New Job: {company} - {title}".encode("latin-1", errors="replace").decode("latin-1")
 
     url = f"https://ntfy.sh/{NTFY_TOPIC}"
@@ -44,9 +50,9 @@ def send_new_job_push(job: dict) -> bool:
     }
 
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(url, data=body.encode("utf-8"), headers=headers)
-            return resp.status_code == 200
+        client = get_http_client()
+        resp = client.post(url, data=body.encode("utf-8"), headers=headers)
+        return resp.status_code == 200
     except Exception as e:
         print(f"Error sending ntfy new job push: {e}")
         return False
@@ -91,9 +97,9 @@ def send_checkpoint_alarm(job: dict, label: str) -> bool:
     }
 
     try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(url, data=body.encode("utf-8"), headers=headers)
-            return resp.status_code == 200
+        client = get_http_client()
+        resp = client.post(url, data=body.encode("utf-8"), headers=headers)
+        return resp.status_code == 200
     except Exception as e:
         print(f"Error sending ntfy checkpoint alarm: {e}")
         return False
