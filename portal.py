@@ -15,7 +15,6 @@ def get_supabase_anon() -> str:
     raw = os.getenv("SUPABASE_ANON", "")
     if not raw:
         return DEFAULT_ANON_KEY
-    # Completely remove all whitespace, newlines, carriage returns, and spaces
     return "".join(raw.split())
 
 _token_cache = {
@@ -89,10 +88,10 @@ def get_valid_access_token() -> str:
 
 def fetch_eligible_jobs() -> list:
     """
-    Fetch live posted jobs with company and salary details directly from PostgREST tables.
+    Fetch live approved campus jobs from job_university_mappings ordered by approved_at date.
     """
     token = get_valid_access_token()
-    url = f"{get_supabase_url()}/rest/v1/jobs_posted?select=*,companies(*),job_salaries(*)&order=created_at.desc&limit=25"
+    url = f"{get_supabase_url()}/rest/v1/job_university_mappings?select=*,jobs_posted(*,companies(*),job_salaries(*))&status=eq.Approved&order=approved_at.desc.nullslast&limit=30"
     headers = {
         "apikey": get_supabase_anon(),
         "Authorization": f"Bearer {token}"
@@ -101,13 +100,14 @@ def fetch_eligible_jobs() -> list:
     with httpx.Client(timeout=15.0) as client:
         resp = client.get(url, headers=headers)
         if resp.status_code == 200:
-            raw_jobs = resp.json()
+            mappings = resp.json()
             formatted_jobs = []
-            for j in raw_jobs:
-                company_info = j.get("companies") or {}
+            for m in mappings:
+                jp = m.get("jobs_posted") or {}
+                company_info = jp.get("companies") or {}
                 company_name = company_info.get("name") if isinstance(company_info, dict) else "Company"
 
-                salaries = j.get("job_salaries") or []
+                salaries = jp.get("job_salaries") or []
                 stipend_val = "N/A"
                 ctc_val = ""
                 if salaries and isinstance(salaries, list) and len(salaries) > 0:
@@ -117,22 +117,26 @@ def fetch_eligible_jobs() -> list:
                     if sal.get("ctc"):
                         ctc_val = f"₹{sal.get('ctc'):,}"
 
+                job_id = str(jp.get("id") or m.get("job_id") or "")
+                if not job_id:
+                    continue
+
                 formatted_jobs.append({
-                    "job_id": str(j.get("id")),
-                    "id": str(j.get("id")),
-                    "title": j.get("title") or "Role",
+                    "job_id": job_id,
+                    "id": job_id,
+                    "title": jp.get("title") or "Role",
                     "company": company_name,
                     "company_name": company_name,
                     "stipend": stipend_val,
                     "ctc": ctc_val,
-                    "deadline": j.get("application_deadline") or j.get("created_at"),
-                    "location": j.get("location") or "",
-                    "link": f"https://recruit.thapar.edu/job/{j.get('id')}",
-                    "raw_json": j
+                    "deadline": jp.get("application_deadline") or m.get("approved_at") or jp.get("created_at"),
+                    "location": jp.get("location") or "",
+                    "link": f"https://recruit.thapar.edu/job/{job_id}",
+                    "raw_json": jp
                 })
             return formatted_jobs
         else:
-            print(f"Error fetching jobs_posted (HTTP {resp.status_code}): {resp.text}")
+            print(f"Error fetching job_university_mappings (HTTP {resp.status_code}): {resp.text}")
             return []
 
 def fetch_applied_job_ids() -> set:
