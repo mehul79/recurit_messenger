@@ -54,6 +54,45 @@ def auth_seed(refresh_token: str = Query(...), secret: str = Query(...)):
         raise HTTPException(status_code=400, detail=f"Token rejected by portal: {e}")
     return "<h2>Token accepted. Watcher is live again.</h2>"
 
+@app.get("/jobs")
+def list_jobs(secret: str = Query(...), limit: int = 10, all: bool = False):
+    """Most recently approved postings the watcher can see, newest first.
+    all=true also returns the ones filtered out, with the reason."""
+    if secret != TICK_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid tick secret")
+    try:
+        jobs = fetch_eligible_jobs(apply_filter=not all)
+        applied = fetch_applied_job_ids()
+    except AuthDead as e:
+        _on_auth_dead(e)
+        raise HTTPException(status_code=503, detail=f"Portal auth broken, re-seed via /auth/seed: {e}")
+
+    session = get_session()
+    try:
+        out = []
+        for j in jobs[:limit]:
+            state = session.query(JobState).filter(JobState.job_id == j["job_id"]).first()
+            out.append({
+                "job_id": j["job_id"],
+                "company": sanitize_text(j["company"]),
+                "title": sanitize_text(j["title"]),
+                "stipend": j["stipend"],
+                "ctc": j["ctc"],
+                "deadline": j["deadline"],
+                "approved_at": j.get("approved_at"),
+                "location": sanitize_text(j["location"]),
+                "eligible": j.get("eligible", True),
+                "skip_reason": j.get("skip_reason", ""),
+                "applied": j["job_id"] in applied,
+                "alerted": bool(session.query(Job).filter(
+                    Job.job_id == j["job_id"], Job.new_alert_sent.is_(True)).first()),
+                "checkpoints_sent": (state.checkpoints_sent if state else []) or [],
+                "silenced": bool(state and (state.opted_out or state.acknowledged)),
+            })
+        return {"count": len(out), "jobs": out}
+    finally:
+        session.close()
+
 def _on_auth_dead(err: Exception):
     """Alert once per outage; the flag is cleared by the next successful refresh."""
     session = get_session()

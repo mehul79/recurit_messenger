@@ -169,9 +169,10 @@ def is_student_eligible_for_job(job: dict, student: dict) -> tuple[bool, str]:
 
     return True, ""
 
-def fetch_eligible_jobs() -> list:
+def fetch_eligible_jobs(apply_filter: bool = True) -> list:
     """
-    Fetch live approved campus jobs and filter strictly against the student's batch, branch, and CGPA.
+    Fetch live approved campus jobs, most recently approved first.
+    apply_filter=False returns every posting with the skip reason attached (debugging).
     """
     token = get_valid_access_token()
     student = fetch_student_profile(token)
@@ -200,7 +201,8 @@ def fetch_eligible_jobs() -> list:
                 eligible, reason = is_student_eligible_for_job(jp, student)
                 if not eligible:
                     print(f"Skipping ineligible job for student profile: {company_name} - {jp.get('title')} ({reason})")
-                    continue
+                    if apply_filter:
+                        continue
 
                 salaries = jp.get("job_salaries") or []
                 stipend_val = "N/A"
@@ -215,6 +217,9 @@ def fetch_eligible_jobs() -> list:
                 formatted_jobs.append({
                     "job_id": job_id,
                     "id": job_id,
+                    "eligible": eligible,
+                    "skip_reason": reason,
+                    "approved_at": m.get("approved_at"),
                     "title": jp.get("title") or "Role",
                     "company": company_name,
                     "company_name": company_name,
