@@ -339,6 +339,7 @@ def handle_tick(secret: str = Query(...)):
         if notify.LAST_ERROR:
             summary["ntfy_error"] = notify.LAST_ERROR
         summary["ntfy_topic"] = notify.NTFY_TOPIC
+        summary["ntfy_auth"] = bool(notify.NTFY_TOKEN)
         return {"status": "ok", "timestamp": now.isoformat(), "summary": summary}
 
     except AuthDead as e:
