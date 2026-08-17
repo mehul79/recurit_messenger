@@ -1,11 +1,19 @@
 import os
 import time
 import httpx
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from dotenv import load_dotenv
 from state import get_session, Meta
 
 load_dotenv()
+
+def log(msg: str):
+    """Job titles carry U+202F etc; a cp1252 console would raise on a bare print()."""
+    try:
+        print(str(msg).encode("ascii", errors="replace").decode("ascii"), flush=True)
+    except Exception:
+        pass
 
 DEFAULT_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtxb3FnemhqbW12dmhnZXZ5ZnBoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzMzUzNjIsImV4cCI6MjA4MzkxMTM2Mn0.b1MjosrjZ0HIbb1Lx0KthlDTgqRB7C9OIqrCV03ahUc"
 
@@ -29,6 +37,7 @@ class AuthDead(Exception):
 AUTH_LOCK_ID = 918273645
 _ACCESS_SKEW = 300  # refresh 5 min early
 
+_META_KEYS = ("refresh_token", "access_token", "access_expires_at", "auth_alert_sent")
 _token_cache = {"access_token": None, "expires_at": 0}
 
 def _meta_put(session, rows: dict, key: str, value: str):
@@ -59,7 +68,7 @@ def get_valid_access_token() -> str:
         # Serialize across workers/instances; released when the txn ends.
         session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": AUTH_LOCK_ID})
         rows = {m.key: m for m in session.query(Meta).filter(
-            Meta.key.in_(("refresh_token", "access_token", "access_expires_at"))).all()}
+            Meta.key.in_(_META_KEYS)).all()}
 
         # Someone else may have refreshed while we waited on the lock.
         cached = rows.get("access_token")
@@ -100,7 +109,7 @@ def seed_refresh_token(refresh_token: str) -> dict:
     try:
         session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": AUTH_LOCK_ID})
         rows = {m.key: m for m in session.query(Meta).filter(
-            Meta.key.in_(("refresh_token", "access_token", "access_expires_at", "auth_alert_sent"))).all()}
+            Meta.key.in_(_META_KEYS)).all()}
         expires_at = time.time() + data.get("expires_in", 3600) - _ACCESS_SKEW
         _meta_put(session, rows, "refresh_token", data.get("refresh_token") or refresh_token.strip())
         _meta_put(session, rows, "access_token", data["access_token"])
@@ -127,45 +136,107 @@ def fetch_student_profile(token: str) -> dict:
             if resp.status_code == 200 and resp.json():
                 return resp.json()[0]
     except Exception as e:
-        print(f"Warning: Failed to fetch student profile: {e}")
+        log(f"Warning: Failed to fetch student profile: {e}")
+    return {}
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def parse_portal_deadline(raw) -> datetime | None:
+    """job_availabilities.application_deadline is a naive local timestamp (23:59, 09:00
+    patterns) - the portal is Indian, so read it as IST and hand back UTC."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=IST)
+    return dt.astimezone(timezone.utc)
+
+def fetch_availabilities(token: str, job_ids: list) -> dict:
+    """job_availabilities holds the real application_deadline and the apply-button gate."""
+    if not job_ids:
+        return {}
+    url = (f"{get_supabase_url()}/rest/v1/job_availabilities"
+           f"?select=job_id,application_deadline,is_application_active,is_job_active,allow_student_applications"
+           f"&job_id=in.({','.join(job_ids)})")
+    headers = {"apikey": get_supabase_anon(), "Authorization": f"Bearer {token}"}
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.get(url, headers=headers)
+        if resp.status_code == 200:
+            return {str(x["job_id"]): x for x in resp.json()}
+        log(f"Warning: job_availabilities fetch failed (HTTP {resp.status_code}): {resp.text[:200]}")
+    except Exception as e:
+        log(f"Warning: job_availabilities fetch failed: {e}")
     return {}
 
 def is_student_eligible_for_job(job: dict, student: dict) -> tuple[bool, str]:
+    """The students table stores branch/course as UUIDs (branch_id, course_id) and has no
+    batch column - the batch is the year of expected_graduation_date. job_eligibilities
+    holds the matching UUID lists, so every comparison here is on ids, not names."""
     if not student:
         return True, ""
 
-    student_cgpa = float(student.get("cgpa") or 0.0)
-    student_batch = str(student.get("batch") or student.get("passing_year") or "2027")
-    student_branch = str(student.get("branch") or student.get("department") or "").lower()
-
     eligibilities = job.get("job_eligibilities") or []
-    if not eligibilities or not isinstance(eligibilities, list):
+    if not isinstance(eligibilities, list) or not eligibilities:
         return True, ""
+    el = eligibilities[0] or {}
 
-    el = eligibilities[0] if len(eligibilities) > 0 else {}
-    
-    # 1. Min CGPA Check
+    # Course (B.E. / MCA / ...)
+    course_id = el.get("course_id")
+    if course_id and student.get("course_id") and course_id != student["course_id"]:
+        return False, "course not eligible"
+
+    # Batch = graduation year
+    batches = [str(x) for x in (el.get("eligible_batches") or [])]
+    grad_year = str(student.get("expected_graduation_date") or "")[:4]
+    if batches and grad_year and grad_year not in batches:
+        return False, f"Batch {grad_year} not in eligible batches {batches}"
+
+    # Branch: eligible_branches, else the same list nested under course_eligible_branches
+    branches = el.get("eligible_branches") or (el.get("course_eligible_branches") or {}).get("branches") or []
+    branch_id = student.get("branch_id")
+    if branches and branch_id and branch_id not in branches:
+        return False, "Branch not eligible for this job"
+
+    # CGPA
     min_gpa = el.get("min_gpa")
     if min_gpa is not None:
         try:
-            if student_cgpa < float(min_gpa):
-                return False, f"CGPA {student_cgpa} < min required {min_gpa}"
-        except ValueError:
+            if float(student.get("cgpa") or 0.0) < float(min_gpa):
+                return False, f"CGPA {student.get('cgpa')} < min required {min_gpa}"
+        except (TypeError, ValueError):
             pass
 
-    # 2. Batch Check
-    eligible_batches = el.get("eligible_batches") or []
-    if eligible_batches and isinstance(eligible_batches, list):
-        str_batches = [str(b) for b in eligible_batches]
-        if student_batch not in str_batches and not any(student_batch in b for b in str_batches):
-            return False, f"Batch {student_batch} not in eligible batches {str_batches}"
+    # Class X / XII cutoffs
+    for el_key, st_key, label in (("min_tenth_marks", "tenth_board_percent", "10th"),
+                                  ("min_twelfth_marks", "twelfth_board_percent", "12th")):
+        required = el.get(el_key)
+        if required is not None:
+            try:
+                if float(student.get(st_key) or 0.0) < float(required):
+                    return False, f"{label} {student.get(st_key)}% < min required {required}%"
+            except (TypeError, ValueError):
+                pass
 
-    # 3. Branch Check
-    eligible_branches = el.get("eligible_branches") or el.get("branches") or []
-    if eligible_branches and isinstance(eligible_branches, list):
-        str_branches = [str(b).lower() for b in eligible_branches]
-        if student_branch and not any(student_branch in b or b in student_branch for b in str_branches):
-            return False, f"Branch {student_branch} not in eligible branches {str_branches}"
+    # Backlogs
+    active = int(student.get("active_backlogs") or 0)
+    ever = int(student.get("number_of_backlogs") or 0)
+    if el.get("disallow_backlog_ever") and ever > 0:
+        return False, f"job disallows any past backlog ({ever})"
+    if el.get("allow_backlogs") is False and active > 0:
+        return False, f"job disallows active backlogs ({active})"
+    allowed_active = el.get("active_backlog_number")
+    if allowed_active is not None and active > int(allowed_active):
+        return False, f"active backlogs {active} > allowed {allowed_active}"
+
+    # Gender (job stores lowercase)
+    genders = [str(g).lower() for g in (el.get("genders") or [])]
+    student_gender = str(student.get("gender") or "").lower()
+    if genders and student_gender and student_gender not in genders:
+        return False, f"gender {student_gender} not in {genders}"
 
     return True, ""
 
@@ -187,6 +258,11 @@ def fetch_eligible_jobs(apply_filter: bool = True) -> list:
         resp = client.get(url, headers=headers)
         if resp.status_code == 200:
             mappings = resp.json()
+            avail = fetch_availabilities(token, [
+                str((m.get("jobs_posted") or {}).get("id") or m.get("job_id") or "")
+                for m in mappings if (m.get("jobs_posted") or {}).get("id") or m.get("job_id")
+            ])
+            now = datetime.now(timezone.utc)
             formatted_jobs = []
             for m in mappings:
                 jp = m.get("jobs_posted") or {}
@@ -199,8 +275,20 @@ def fetch_eligible_jobs(apply_filter: bool = True) -> list:
 
                 # Strict Student Eligibility Check (Batch, Branch, CGPA)
                 eligible, reason = is_student_eligible_for_job(jp, student)
+
+                # The apply button is gated by job_availabilities, not by the mapping status.
+                av = avail.get(job_id) or {}
+                deadline = parse_portal_deadline(av.get("application_deadline"))
+                apply_open = not (av.get("allow_student_applications") is False
+                                  or av.get("is_application_active") is False
+                                  or av.get("is_job_active") is False)
+                if eligible and not apply_open:
+                    eligible, reason = False, "applications not open on the portal"
+                elif eligible and deadline and deadline <= now:
+                    eligible, reason = False, f"deadline passed ({deadline.isoformat()})"
+
                 if not eligible:
-                    print(f"Skipping ineligible job for student profile: {company_name} - {jp.get('title')} ({reason})")
+                    log(f"Skipping ineligible job for student profile: {company_name} - {jp.get('title')} ({reason})")
                     if apply_filter:
                         continue
 
@@ -219,20 +307,21 @@ def fetch_eligible_jobs(apply_filter: bool = True) -> list:
                     "id": job_id,
                     "eligible": eligible,
                     "skip_reason": reason,
+                    "apply_open": apply_open,
                     "approved_at": m.get("approved_at"),
                     "title": jp.get("title") or "Role",
                     "company": company_name,
                     "company_name": company_name,
                     "stipend": stipend_val,
                     "ctc": ctc_val,
-                    "deadline": jp.get("application_deadline") or m.get("approved_at") or jp.get("created_at"),
+                    "deadline": deadline.isoformat() if deadline else None,
                     "location": jp.get("location") or "",
                     "link": f"https://recruit.thapar.edu/student/jobs",
                     "raw_json": jp
                 })
             return formatted_jobs
         else:
-            print(f"Error fetching job_university_mappings (HTTP {resp.status_code}): {resp.text}")
+            log(f"Error fetching job_university_mappings (HTTP {resp.status_code}): {resp.text}")
             return []
 
 def fetch_applied_job_ids() -> set:
@@ -252,5 +341,5 @@ def fetch_applied_job_ids() -> set:
             data = resp.json()
             return {str(item["job_id"]) for item in data if "job_id" in item}
         else:
-            print(f"Error fetching applications (HTTP {resp.status_code}): {resp.text}")
+            log(f"Error fetching applications (HTTP {resp.status_code}): {resp.text}")
             return set()

@@ -246,6 +246,15 @@ def handle_tick(secret: str = Query(...)):
 
                 db_state = JobState(job_id=job_id, checkpoints_sent=[])
                 session.add(db_state)
+            else:
+                # Deadlines and stipends get edited on the portal after posting, so keep
+                # the row in sync - otherwise a stale deadline silently kills the alarms.
+                db_job.deadline = deadline_dt
+                db_job.stipend = stipend
+                db_job.ctc = ctc
+                db_job.location = location
+                db_job.title = title
+                db_job.company = company
 
             if not db_job.new_alert_sent:
                 job_dict = {
