@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -15,13 +16,26 @@ TICK_SECRET = os.getenv("TICK_SECRET", "dev_tick_secret_123")
 
 app = FastAPI(title="Thapar RecruitSage Watcher")
 
+def sanitize_text(text: str) -> str:
+    if not text:
+        return ""
+    # Replace narrow non-breaking spaces (\u202f, \xa0) and non-standard whitespace with plain spaces
+    cleaned = re.sub(r'[\u202f\xa0\u200b\u200e\u200f]', ' ', str(text))
+    return cleaned.strip()
+
+def safe_log_print(msg: str):
+    try:
+        print(msg.encode("ascii", errors="replace").decode("ascii"), flush=True)
+    except Exception:
+        pass
+
 @app.on_event("startup")
 def on_startup():
     try:
         init_db()
-        print("Database schema initialized successfully.", flush=True)
+        safe_log_print("Database schema initialized successfully.")
     except Exception as e:
-        print(f"Warning: Database initialization deferred: {e}", flush=True)
+        safe_log_print(f"Warning: Database initialization deferred: {e}")
 
 @app.get("/health")
 @app.post("/health")
@@ -84,15 +98,15 @@ def handle_action(
         session.add(log_entry)
         session.commit()
 
-        job_title = job_obj.title if job_obj else job
-        company = job_obj.company if job_obj else ""
+        job_title = sanitize_text(job_obj.title) if job_obj else job
+        company = sanitize_text(job_obj.company) if job_obj else ""
 
         return f"""
         <html>
             <head><title>Action Recorded</title></head>
             <body style="font-family: sans-serif; text-align: center; padding: 40px; background: #121212; color: #fff;">
                 <h2 style="color: #4CAF50;">✓ Action Confirmed</h2>
-                <p><strong>{company} · {job_title}</strong></p>
+                <p><strong>{company} - {job_title}</strong></p>
                 <p>Status: {action_text}</p>
                 <p style="color: #aaa; font-size: 0.9em;">You will receive no further alarms for this job posting.</p>
             </body>
@@ -120,21 +134,21 @@ def handle_tick(secret: str = Query(...)):
     }
 
     try:
-        print("Polling jobs from Supabase PostgREST...", flush=True)
+        safe_log_print("Polling jobs from Supabase PostgREST...")
         raw_jobs = fetch_eligible_jobs()
         summary["new_jobs_found"] = len(raw_jobs)
-        print(f"Retrieved {len(raw_jobs)} job postings from Supabase.", flush=True)
+        safe_log_print(f"Retrieved {len(raw_jobs)} job postings from Supabase.")
 
         for rj in raw_jobs:
             job_id = str(rj.get("id") or rj.get("job_id") or "")
             if not job_id:
                 continue
 
-            company = rj.get("company_name") or rj.get("company") or "Company"
-            title = rj.get("job_title") or rj.get("title") or "Role"
-            stipend = str(rj.get("stipend") or "N/A")
-            ctc = str(rj.get("ctc") or "")
-            location = rj.get("location") or ""
+            company = sanitize_text(rj.get("company_name") or rj.get("company") or "Company")
+            title = sanitize_text(rj.get("title") or rj.get("job_title") or "Role")
+            stipend = sanitize_text(str(rj.get("stipend") or "N/A"))
+            ctc = sanitize_text(str(rj.get("ctc") or ""))
+            location = sanitize_text(rj.get("location") or "")
             link = f"https://recruit.thapar.edu/job/{job_id}"
 
             deadline_dt = None
@@ -177,7 +191,7 @@ def handle_tick(secret: str = Query(...)):
                     "location": location,
                     "link": link
                 }
-                print(f"Sending ntfy alert for new job: {company} - {title}...", flush=True)
+                safe_log_print(f"Sending ntfy alert for new job: {company} - {title}...")
                 success = send_new_job_push(job_dict)
                 if success:
                     db_job.new_alert_sent = True
@@ -185,16 +199,16 @@ def handle_tick(secret: str = Query(...)):
                         job_id=job_id,
                         sent_at=now,
                         kind="new_job",
-                        message=f"Sent initial job alert for {company} · {title}"
+                        message=f"Sent initial job alert for {company} - {title}"
                     )
                     session.add(log_row)
                     summary["new_pushes_sent"] += 1
 
         session.commit()
 
-        print("Fetching student application status...", flush=True)
+        safe_log_print("Fetching student application status...")
         applied_ids = fetch_applied_job_ids()
-        print(f"Found {len(applied_ids)} applied job IDs.", flush=True)
+        safe_log_print(f"Found {len(applied_ids)} applied job IDs.")
 
         active_jobs = session.query(Job).join(JobState).all()
         summary["jobs_checked"] = len(active_jobs)
@@ -229,7 +243,7 @@ def handle_tick(secret: str = Query(...)):
                     "location": job.location,
                     "link": job.link
                 }
-                print(f"Sending ntfy checkpoint alarm ({checkpoint_due}) for: {job.company} - {job.title}...", flush=True)
+                safe_log_print(f"Sending ntfy checkpoint alarm ({checkpoint_due}) for: {job.company} - {job.title}...")
                 success = send_checkpoint_alarm(job_dict, checkpoint_due)
                 if success:
                     updated_checkpoints = list(checkpoints_sent) + [checkpoint_due]
@@ -238,13 +252,13 @@ def handle_tick(secret: str = Query(...)):
                         job_id=job.job_id,
                         sent_at=now,
                         kind=f"checkpoint_{checkpoint_due}",
-                        message=f"Sent {checkpoint_due} deadline alarm for {job.company} · {job.title}"
+                        message=f"Sent {checkpoint_due} deadline alarm for {job.company} - {job.title}"
                     )
                     session.add(log_row)
                     session.commit()
                     summary["checkpoints_fired"] += 1
 
-        print(f"Tick execution complete. Summary: {summary}", flush=True)
+        safe_log_print(f"Tick execution complete. Summary: {summary}")
         return {"status": "ok", "timestamp": now.isoformat(), "summary": summary}
 
     except Exception as e:
