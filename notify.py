@@ -1,4 +1,5 @@
 import os
+import socket
 import httpx
 from dotenv import load_dotenv
 
@@ -8,6 +9,8 @@ NTFY_TOPIC = os.getenv("NTFY_TOPIC", "thapar_job_alert_7979")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
 TICK_SECRET = os.getenv("TICK_SECRET", "dev_tick_secret_123")
 STUDENT_PORTAL_JOBS_URL = "https://recruit.thapar.edu/student/jobs"
+# Stamped on every push so a notification's origin is never ambiguous.
+ORIGIN = os.getenv("RENDER_SERVICE_NAME") or os.getenv("RENDER_INSTANCE_ID") or socket.gethostname()
 
 _client = None
 LAST_ERROR = ""
@@ -67,6 +70,7 @@ def send_new_job_push(job: dict) -> bool:
     if location:
         body_lines.append(f"Location: {location}")
     body_lines.append(f"Link: {link}")
+    body_lines.append(f"src: {ORIGIN}")
 
     body = "\n".join(body_lines)
     header_title = f"New Job: {company} - {title}".encode("latin-1", errors="replace").decode("latin-1")
@@ -109,6 +113,7 @@ def send_checkpoint_alarm(job: dict, label: str) -> bool:
         body_lines.append(f"CTC: {ctc}")
     body_lines.append(f"Deadline: {deadline}")
     body_lines.append(f"Link: {link}")
+    body_lines.append(f"src: {ORIGIN}")
 
     body = "\n".join(body_lines)
 
