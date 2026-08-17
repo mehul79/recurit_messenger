@@ -17,9 +17,11 @@ app = FastAPI(title="Thapar RecruitSage Watcher")
 
 @app.on_event("startup")
 def on_startup():
-    init_db()
-
-
+    try:
+        init_db()
+        print("Database schema initialized successfully.", flush=True)
+    except Exception as e:
+        print(f"Warning: Database initialization deferred: {e}", flush=True)
 
 @app.get("/health")
 def health():
@@ -56,7 +58,6 @@ def handle_action(
         if not state_obj:
             state_obj = JobState(job_id=job)
             session.add(state_obj)
-
 
         action_kind = ""
         action_text = ""
@@ -114,7 +115,6 @@ def handle_tick(secret: str = Query(...)):
     }
 
     try:
-        # Step 1: Poll eligible jobs from Supabase RPC
         print("Polling jobs from Supabase PostgREST...", flush=True)
         raw_jobs = fetch_eligible_jobs()
         summary["new_jobs_found"] = len(raw_jobs)
@@ -187,7 +187,6 @@ def handle_tick(secret: str = Query(...)):
 
         session.commit()
 
-        # Step 2: Check applied status and deadline escalation loop
         print("Fetching student application status...", flush=True)
         applied_ids = fetch_applied_job_ids()
         print(f"Found {len(applied_ids)} applied job IDs.", flush=True)
@@ -248,3 +247,8 @@ def handle_tick(secret: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
