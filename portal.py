@@ -86,12 +86,68 @@ def get_valid_access_token() -> str:
         return _token_cache["access_token"]
     return refresh_access_token()
 
+def fetch_student_profile(token: str) -> dict:
+    url = f"{get_supabase_url()}/rest/v1/students?select=*"
+    headers = {
+        "apikey": get_supabase_anon(),
+        "Authorization": f"Bearer {token}"
+    }
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(url, headers=headers)
+            if resp.status_code == 200 and resp.json():
+                return resp.json()[0]
+    except Exception as e:
+        print(f"Warning: Failed to fetch student profile: {e}")
+    return {}
+
+def is_student_eligible_for_job(job: dict, student: dict) -> tuple[bool, str]:
+    if not student:
+        return True, ""
+
+    student_cgpa = float(student.get("cgpa") or 0.0)
+    student_batch = str(student.get("batch") or student.get("passing_year") or "2027")
+    student_branch = str(student.get("branch") or student.get("department") or "").lower()
+
+    eligibilities = job.get("job_eligibilities") or []
+    if not eligibilities or not isinstance(eligibilities, list):
+        return True, ""
+
+    el = eligibilities[0] if len(eligibilities) > 0 else {}
+    
+    # 1. Min CGPA Check
+    min_gpa = el.get("min_gpa")
+    if min_gpa is not None:
+        try:
+            if student_cgpa < float(min_gpa):
+                return False, f"CGPA {student_cgpa} < min required {min_gpa}"
+        except ValueError:
+            pass
+
+    # 2. Batch Check
+    eligible_batches = el.get("eligible_batches") or []
+    if eligible_batches and isinstance(eligible_batches, list):
+        str_batches = [str(b) for b in eligible_batches]
+        if student_batch not in str_batches and not any(student_batch in b for b in str_batches):
+            return False, f"Batch {student_batch} not in eligible batches {str_batches}"
+
+    # 3. Branch Check
+    eligible_branches = el.get("eligible_branches") or el.get("branches") or []
+    if eligible_branches and isinstance(eligible_branches, list):
+        str_branches = [str(b).lower() for b in eligible_branches]
+        if student_branch and not any(student_branch in b or b in student_branch for b in str_branches):
+            return False, f"Branch {student_branch} not in eligible branches {str_branches}"
+
+    return True, ""
+
 def fetch_eligible_jobs() -> list:
     """
-    Fetch live approved campus jobs from job_university_mappings ordered by approved_at date.
+    Fetch live approved campus jobs and filter strictly against the student's batch, branch, and CGPA.
     """
     token = get_valid_access_token()
-    url = f"{get_supabase_url()}/rest/v1/job_university_mappings?select=*,jobs_posted(*,companies(*),job_salaries(*))&status=eq.Approved&order=approved_at.desc.nullslast&limit=30"
+    student = fetch_student_profile(token)
+
+    url = f"{get_supabase_url()}/rest/v1/job_university_mappings?select=*,jobs_posted(*,companies(*),job_salaries(*),job_eligibilities(*))&status=eq.Approved&order=approved_at.desc.nullslast&limit=40"
     headers = {
         "apikey": get_supabase_anon(),
         "Authorization": f"Bearer {token}"
@@ -107,6 +163,16 @@ def fetch_eligible_jobs() -> list:
                 company_info = jp.get("companies") or {}
                 company_name = company_info.get("name") if isinstance(company_info, dict) else "Company"
 
+                job_id = str(jp.get("id") or m.get("job_id") or "")
+                if not job_id:
+                    continue
+
+                # Strict Student Eligibility Check (Batch, Branch, CGPA)
+                eligible, reason = is_student_eligible_for_job(jp, student)
+                if not eligible:
+                    print(f"Skipping ineligible job for student profile: {company_name} - {jp.get('title')} ({reason})")
+                    continue
+
                 salaries = jp.get("job_salaries") or []
                 stipend_val = "N/A"
                 ctc_val = ""
@@ -116,10 +182,6 @@ def fetch_eligible_jobs() -> list:
                         stipend_val = f"₹{sal.get('stipend'):,}/pm"
                     if sal.get("ctc"):
                         ctc_val = f"₹{sal.get('ctc'):,}"
-
-                job_id = str(jp.get("id") or m.get("job_id") or "")
-                if not job_id:
-                    continue
 
                 formatted_jobs.append({
                     "job_id": job_id,
@@ -131,7 +193,7 @@ def fetch_eligible_jobs() -> list:
                     "ctc": ctc_val,
                     "deadline": jp.get("application_deadline") or m.get("approved_at") or jp.get("created_at"),
                     "location": jp.get("location") or "",
-                    "link": f"https://recruit.thapar.edu/job/{job_id}",
+                    "link": f"https://recruit.thapar.edu/student/jobs",
                     "raw_json": jp
                 })
             return formatted_jobs
