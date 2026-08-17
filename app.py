@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from state import get_session, Job, JobState, NotificationLog, init_db, Meta
 from portal import fetch_eligible_jobs, fetch_applied_job_ids, seed_refresh_token, AuthDead
+import notify
 from notify import send_new_job_push, send_checkpoint_alarm, send_auth_alert
 from escalation import evaluate_next_checkpoint
 
@@ -335,6 +336,9 @@ def handle_tick(secret: str = Query(...)):
                     summary["checkpoints_fired"] += 1
 
         safe_log_print(f"Tick execution complete. Summary: {summary}")
+        if notify.LAST_ERROR:
+            summary["ntfy_error"] = notify.LAST_ERROR
+        summary["ntfy_topic"] = notify.NTFY_TOPIC
         return {"status": "ok", "timestamp": now.isoformat(), "summary": summary}
 
     except AuthDead as e:

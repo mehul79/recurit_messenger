@@ -10,6 +10,14 @@ TICK_SECRET = os.getenv("TICK_SECRET", "dev_tick_secret_123")
 STUDENT_PORTAL_JOBS_URL = "https://recruit.thapar.edu/student/jobs"
 
 _client = None
+LAST_ERROR = ""
+
+def _fail(msg: str) -> bool:
+    """Push failures used to vanish into a print on a server whose logs nobody reads."""
+    global LAST_ERROR
+    LAST_ERROR = msg
+    print(f"ntfy send failed: {msg}", flush=True)
+    return False
 
 def get_http_client():
     global _client
@@ -74,10 +82,11 @@ def send_new_job_push(job: dict) -> bool:
     try:
         client = get_http_client()
         resp = client.post(url, data=body.encode("utf-8"), headers=headers)
-        return resp.status_code == 200
+        if resp.status_code != 200:
+            return _fail(f"new_job HTTP {resp.status_code}: {resp.text[:200]}")
+        return True
     except Exception as e:
-        print(f"Error sending ntfy new job push: {e}")
-        return False
+        return _fail(f"new_job {type(e).__name__}: {e}")
 
 def send_checkpoint_alarm(job: dict, label: str) -> bool:
     """
@@ -121,7 +130,8 @@ def send_checkpoint_alarm(job: dict, label: str) -> bool:
     try:
         client = get_http_client()
         resp = client.post(url, data=body.encode("utf-8"), headers=headers)
-        return resp.status_code == 200
+        if resp.status_code != 200:
+            return _fail(f"checkpoint HTTP {resp.status_code}: {resp.text[:200]}")
+        return True
     except Exception as e:
-        print(f"Error sending ntfy checkpoint alarm: {e}")
-        return False
+        return _fail(f"checkpoint {type(e).__name__}: {e}")
