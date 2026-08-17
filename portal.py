@@ -6,9 +6,17 @@ from state import get_session, Meta
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://api.recruit.thapar.edu").strip()
-SUPABASE_ANON = os.getenv("SUPABASE_ANON", "").strip().replace("\n", "").replace("\r", "")
+DEFAULT_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtxb3FnemhqbW12dmhnZXZ5ZnBoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzMzUzNjIsImV4cCI6MjA4MzkxMTM2Mn0.b1MjosrjZ0HIbb1Lx0KthlDTgqRB7C9OIqrCV03ahUc"
 
+def get_supabase_url() -> str:
+    return os.getenv("SUPABASE_URL", "https://api.recruit.thapar.edu").strip().rstrip("/")
+
+def get_supabase_anon() -> str:
+    raw = os.getenv("SUPABASE_ANON", "")
+    if not raw:
+        return DEFAULT_ANON_KEY
+    # Completely remove all whitespace, newlines, carriage returns, and spaces
+    return "".join(raw.split())
 
 _token_cache = {
     "access_token": None,
@@ -27,7 +35,7 @@ def get_stored_refresh_token() -> str:
     finally:
         session.close()
     
-    return os.getenv("PORTAL_REFRESH_TOKEN", "")
+    return os.getenv("PORTAL_REFRESH_TOKEN", "").strip()
 
 def update_stored_tokens(access_token: str, refresh_token: str, expires_in: int = 3600):
     global _token_cache
@@ -54,9 +62,9 @@ def refresh_access_token() -> str:
     if not refresh_token:
         raise ValueError("No PORTAL_REFRESH_TOKEN found in .env or database meta table!")
     
-    url = f"{SUPABASE_URL}/auth/v1/token?grant_type=refresh_token"
+    url = f"{get_supabase_url()}/auth/v1/token?grant_type=refresh_token"
     headers = {
-        "apikey": SUPABASE_ANON,
+        "apikey": get_supabase_anon(),
         "Content-Type": "application/json"
     }
     payload = {"refresh_token": refresh_token}
@@ -84,9 +92,9 @@ def fetch_eligible_jobs() -> list:
     Fetch live posted jobs with company and salary details directly from PostgREST tables.
     """
     token = get_valid_access_token()
-    url = f"{SUPABASE_URL}/rest/v1/jobs_posted?select=*,companies(*),job_salaries(*)&order=created_at.desc&limit=25"
+    url = f"{get_supabase_url()}/rest/v1/jobs_posted?select=*,companies(*),job_salaries(*)&order=created_at.desc&limit=25"
     headers = {
-        "apikey": SUPABASE_ANON,
+        "apikey": get_supabase_anon(),
         "Authorization": f"Bearer {token}"
     }
     
@@ -132,9 +140,9 @@ def fetch_applied_job_ids() -> set:
     Fetch set of applied job IDs for student from applications table.
     """
     token = get_valid_access_token()
-    url = f"{SUPABASE_URL}/rest/v1/applications?select=job_id"
+    url = f"{get_supabase_url()}/rest/v1/applications?select=job_id"
     headers = {
-        "apikey": SUPABASE_ANON,
+        "apikey": get_supabase_anon(),
         "Authorization": f"Bearer {token}"
     }
     
