@@ -6,8 +6,8 @@ from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 
 from state import get_session, Job, JobState, NotificationLog, init_db, Meta
-from portal import fetch_eligible_jobs, fetch_applied_job_ids
-from notify import send_new_job_push, send_checkpoint_alarm
+from portal import fetch_eligible_jobs, fetch_applied_job_ids, seed_refresh_token, AuthDead
+from notify import send_new_job_push, send_checkpoint_alarm, send_auth_alert
 from escalation import evaluate_next_checkpoint
 
 load_dotenv()
@@ -39,10 +39,38 @@ def on_startup():
 
 @app.get("/health")
 @app.post("/health")
-def health(secret: str = None):
-    if secret == TICK_SECRET:
-        return handle_tick(secret=secret)
+def health():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+@app.get("/auth/seed", response_class=HTMLResponse)
+@app.post("/auth/seed", response_class=HTMLResponse)
+def auth_seed(refresh_token: str = Query(...), secret: str = Query(...)):
+    """Re-arm the token chain from a browser-exported refresh_token."""
+    if secret != TICK_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid tick secret")
+    try:
+        seed_refresh_token(refresh_token)
+    except AuthDead as e:
+        raise HTTPException(status_code=400, detail=f"Token rejected by portal: {e}")
+    return "<h2>Token accepted. Watcher is live again.</h2>"
+
+def _on_auth_dead(err: Exception):
+    """Alert once per outage; the flag is cleared by the next successful refresh."""
+    session = get_session()
+    try:
+        row = session.query(Meta).filter(Meta.key == "auth_alert_sent").first()
+        if row and row.value:
+            return
+        if send_auth_alert(str(err)):
+            if row:
+                row.value = "1"
+            else:
+                session.add(Meta(key="auth_alert_sent", value="1"))
+            session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
 
 @app.get("/act", response_class=HTMLResponse)
 @app.post("/act", response_class=HTMLResponse)
@@ -261,6 +289,11 @@ def handle_tick(secret: str = Query(...)):
         safe_log_print(f"Tick execution complete. Summary: {summary}")
         return {"status": "ok", "timestamp": now.isoformat(), "summary": summary}
 
+    except AuthDead as e:
+        session.rollback()
+        safe_log_print(f"AUTH DEAD: {e}")
+        _on_auth_dead(e)
+        raise HTTPException(status_code=503, detail=f"Portal auth broken, re-seed via /auth/seed: {e}")
     except Exception as e:
         session.rollback()
         raise HTTPException(status_code=500, detail=str(e))

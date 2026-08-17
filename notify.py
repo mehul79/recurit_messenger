@@ -17,6 +17,27 @@ def get_http_client():
         _client = httpx.Client(timeout=20.0, follow_redirects=True)
     return _client
 
+def send_auth_alert(detail: str) -> bool:
+    """Portal login chain is dead -> the watcher is blind. Say so loudly, once."""
+    body = (
+        "The watcher can no longer log in to the portal, so NO job alerts are being sent.\n\n"
+        "Fix: log in at recruit.thapar.edu in a browser, copy refresh_token from the "
+        "sb-*-auth-token localStorage entry, then POST it to:\n"
+        f"{PUBLIC_BASE_URL}/auth/seed?secret={TICK_SECRET}&refresh_token=<token>\n\n"
+        f"Detail: {detail}"
+    )
+    try:
+        resp = get_http_client().post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=body.encode("utf-8"),
+            headers={"Title": "RecruitSage AUTH BROKEN - action needed",
+                     "Priority": "urgent", "Tags": "rotating_light"},
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"Error sending ntfy auth alert: {e}")
+        return False
+
 def send_new_job_push(job: dict) -> bool:
     """
     Spec #1: New eligible job appears -> send one plain ntfy push, no buttons, no alarm priority.

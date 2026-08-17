@@ -1,6 +1,7 @@
 import os
 import time
 import httpx
+from sqlalchemy import text
 from dotenv import load_dotenv
 from state import get_session, Meta
 
@@ -17,99 +18,102 @@ def get_supabase_anon() -> str:
         return DEFAULT_ANON_KEY
     return "".join(raw.split())
 
-_token_cache = {
-    "access_token": None,
-    "expires_at": 0
-}
 
-def get_stored_refresh_token() -> str:
-    session = get_session()
-    try:
-        meta_row = session.query(Meta).filter(Meta.key == "refresh_token").first()
-        if meta_row and meta_row.value:
-            session.close()
-            return meta_row.value
-    except Exception:
-        pass
-    finally:
-        session.close()
-    
-    return os.getenv("PORTAL_REFRESH_TOKEN", "").strip()
+class AuthDead(Exception):
+    """The refresh-token chain is broken. Only a human re-seed can fix it."""
 
-def update_stored_tokens(access_token: str, refresh_token: str, expires_in: int = 3600):
-    global _token_cache
-    _token_cache["access_token"] = access_token
-    _token_cache["expires_at"] = time.time() + (expires_in - 60)
+# Password grant is Turnstile-gated server-side, so refresh-token rotation is the ONLY
+# usable auth path. The chain survives exactly as long as every rotated token is
+# persisted, so: one refresher at a time (advisory lock), and the new token is committed
+# before the access token is handed out.
+AUTH_LOCK_ID = 918273645
+_ACCESS_SKEW = 300  # refresh 5 min early
 
-    session = get_session()
-    try:
-        row = session.query(Meta).filter(Meta.key == "refresh_token").first()
-        if not row:
-            row = Meta(key="refresh_token", value=refresh_token)
-            session.add(row)
-        else:
-            row.value = refresh_token
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        print(f"Warning: Failed to save refresh_token to DB: {e}")
-    finally:
-        session.close()
+_token_cache = {"access_token": None, "expires_at": 0}
 
-def login_with_password() -> str:
-    email = os.getenv("PORTAL_EMAIL", "mgupta6_be23@thapar.edu")
-    password = os.getenv("PORTAL_PASSWORD", "Alpha@123")
-    
-    url = f"{get_supabase_url()}/auth/v1/token?grant_type=password"
-    headers = {
-        "apikey": get_supabase_anon(),
-        "Content-Type": "application/json"
-    }
-    payload = {"email": email, "password": password}
+def _meta_put(session, rows: dict, key: str, value: str):
+    row = rows.get(key)
+    if row is None:
+        session.add(Meta(key=key, value=value))
+    else:
+        row.value = value
 
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(url, headers=headers, json=payload)
-        if resp.status_code == 200:
-            data = resp.json()
-            access_token = data.get("access_token")
-            refresh_token = data.get("refresh_token")
-            expires_in = data.get("expires_in", 3600)
-            update_stored_tokens(access_token, refresh_token, expires_in)
-            print("Successfully authenticated via email & password fallback!")
-            return access_token
-        else:
-            raise RuntimeError(f"Failed email/password authentication (HTTP {resp.status_code}): {resp.text}")
-
-def refresh_access_token() -> str:
-    refresh_token = get_stored_refresh_token()
-    if not refresh_token:
-        return login_with_password()
-    
+def _refresh_grant(refresh_token: str) -> dict:
     url = f"{get_supabase_url()}/auth/v1/token?grant_type=refresh_token"
-    headers = {
-        "apikey": get_supabase_anon(),
-        "Content-Type": "application/json"
-    }
-    payload = {"refresh_token": refresh_token}
-    
+    headers = {"apikey": get_supabase_anon(), "Content-Type": "application/json"}
     with httpx.Client(timeout=15.0) as client:
-        resp = client.post(url, headers=headers, json=payload)
-        if resp.status_code == 200:
-            data = resp.json()
-            new_access_token = data.get("access_token")
-            new_refresh_token = data.get("refresh_token", refresh_token)
-            expires_in = data.get("expires_in", 3600)
-            update_stored_tokens(new_access_token, new_refresh_token, expires_in)
-            return new_access_token
-        else:
-            print(f"Refresh token failed (HTTP {resp.status_code}): {resp.text}. Falling back to email/password login...")
-            return login_with_password()
+        resp = client.post(url, headers=headers, json={"refresh_token": refresh_token})
+    if resp.status_code != 200:
+        raise AuthDead(f"refresh_token grant rejected (HTTP {resp.status_code}): {resp.text}")
+    data = resp.json()
+    if not data.get("access_token"):
+        raise AuthDead(f"refresh_token grant returned no access_token: {resp.text}")
+    return data
 
 def get_valid_access_token() -> str:
-    global _token_cache
     if _token_cache["access_token"] and time.time() < _token_cache["expires_at"]:
         return _token_cache["access_token"]
-    return refresh_access_token()
+
+    session = get_session()
+    try:
+        # Serialize across workers/instances; released when the txn ends.
+        session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": AUTH_LOCK_ID})
+        rows = {m.key: m for m in session.query(Meta).filter(
+            Meta.key.in_(("refresh_token", "access_token", "access_expires_at"))).all()}
+
+        # Someone else may have refreshed while we waited on the lock.
+        cached = rows.get("access_token")
+        exp_row = rows.get("access_expires_at")
+        exp = float(exp_row.value) if exp_row and exp_row.value else 0.0
+        if cached and cached.value and time.time() < exp:
+            _token_cache.update(access_token=cached.value, expires_at=exp)
+            session.rollback()
+            return cached.value
+
+        stored = rows.get("refresh_token")
+        refresh_token = (stored.value if stored else None) or os.getenv("PORTAL_REFRESH_TOKEN", "").strip()
+        if not refresh_token:
+            raise AuthDead("no refresh_token stored - seed one via POST /auth/seed")
+
+        data = _refresh_grant(refresh_token)
+        access_token = data["access_token"]
+        expires_at = time.time() + data.get("expires_in", 3600) - _ACCESS_SKEW
+
+        _meta_put(session, rows, "refresh_token", data.get("refresh_token") or refresh_token)
+        _meta_put(session, rows, "access_token", access_token)
+        _meta_put(session, rows, "access_expires_at", str(expires_at))
+        _meta_put(session, rows, "auth_alert_sent", "")
+        session.commit()  # rotation is durable BEFORE the token is used
+
+        _token_cache.update(access_token=access_token, expires_at=expires_at)
+        return access_token
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+def seed_refresh_token(refresh_token: str) -> dict:
+    """Re-arm the chain from a browser-exported refresh_token. Verifies it before storing."""
+    data = _refresh_grant(refresh_token.strip())
+    session = get_session()
+    try:
+        session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": AUTH_LOCK_ID})
+        rows = {m.key: m for m in session.query(Meta).filter(
+            Meta.key.in_(("refresh_token", "access_token", "access_expires_at", "auth_alert_sent"))).all()}
+        expires_at = time.time() + data.get("expires_in", 3600) - _ACCESS_SKEW
+        _meta_put(session, rows, "refresh_token", data.get("refresh_token") or refresh_token.strip())
+        _meta_put(session, rows, "access_token", data["access_token"])
+        _meta_put(session, rows, "access_expires_at", str(expires_at))
+        _meta_put(session, rows, "auth_alert_sent", "")
+        session.commit()
+        _token_cache.update(access_token=data["access_token"], expires_at=expires_at)
+        return {"status": "ok", "access_token_valid_until": expires_at}
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 def fetch_student_profile(token: str) -> dict:
     url = f"{get_supabase_url()}/rest/v1/students?select=*"

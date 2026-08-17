@@ -67,7 +67,9 @@ def get_engine():
             url = url.replace("postgresql://", "postgresql+psycopg://", 1)
         elif url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql+psycopg://", 1)
-        _engine = create_engine(url, pool_pre_ping=True)
+        # Supabase pooler (:6543) is pgbouncer in transaction mode -> prepared statements break it.
+        connect_args = {"prepare_threshold": None} if ":6543" in url else {}
+        _engine = create_engine(url, pool_pre_ping=True, pool_recycle=300, connect_args=connect_args)
     return _engine
 
 
