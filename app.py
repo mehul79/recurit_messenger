@@ -23,16 +23,19 @@ def on_startup():
     except Exception as e:
         print(f"Warning: Database initialization deferred: {e}", flush=True)
 
-@app.get("/health")
-def health():
+@app.api_route("/health", methods=["GET", "POST"])
+def health(secret: str = None):
+    if secret == TICK_SECRET:
+        return handle_tick(secret=secret)
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
 
-@app.post("/act", response_class=HTMLResponse)
+@app.api_route("/act", methods=["GET", "POST"], response_class=HTMLResponse)
 def handle_action(
     job: str = Query(...),
     a: str = Query(...),
     secret: str = Query(...)
 ):
+
     if secret != TICK_SECRET:
         raise HTTPException(status_code=403, detail="Invalid tick secret")
     
@@ -100,8 +103,9 @@ def handle_action(
     finally:
         session.close()
 
-@app.post("/tick")
+@app.api_route("/tick", methods=["GET", "POST"])
 def handle_tick(secret: str = Query(...)):
+
     if secret != TICK_SECRET:
         raise HTTPException(status_code=403, detail="Invalid tick secret")
 
